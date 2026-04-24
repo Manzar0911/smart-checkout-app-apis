@@ -44,7 +44,7 @@ app.use('/api/upload', uploadRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok running', timestamp: new Date().toISOString() });
 });
 
 // 404 handler
