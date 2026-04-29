@@ -45,8 +45,8 @@ router.post('/', auth, async (req, res) => {
 
     // Insert order
     await connection.query(
-      `INSERT INTO orders (id, user_id, subtotal, discount, coupon_code, total, payment_method, transaction_id, status, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'paid', ?)`,
+      `INSERT INTO orders (id, user_id, subtotal, discount, coupon_code, total, payment_method, transaction_id, status, is_verified, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'paid', FALSE, ?)`,
       [orderId, targetUserId, subtotal, discount || 0, couponCode || null, total, paymentMethod, transactionId, createdBy]
     );
 
@@ -95,6 +95,7 @@ router.post('/', auth, async (req, res) => {
         paymentMethod: { name: paymentMethod },
         transactionId,
         status: 'paid',
+        isVerified: false,
       },
     });
   } catch (error) {
@@ -147,6 +148,7 @@ router.get('/', auth, async (req, res) => {
           paymentMethod: { name: order.payment_method },
           transactionId: order.transaction_id,
           status: order.status,
+          isVerified: !!order.is_verified,
         };
       })
     );
@@ -203,6 +205,7 @@ router.get('/:id', auth, async (req, res) => {
         paymentMethod: { name: order.payment_method },
         transactionId: order.transaction_id,
         status: order.status,
+        isVerified: !!order.is_verified,
       },
     });
   } catch (error) {
@@ -257,6 +260,7 @@ router.get('/verify/:id', auth, async (req, res) => {
         paymentMethod: { name: order.payment_method },
         transactionId: order.transaction_id,
         status: order.status,
+        isVerified: !!order.is_verified,
       },
     });
   } catch (error) {
@@ -269,7 +273,7 @@ router.get('/verify/:id', auth, async (req, res) => {
 router.put('/verify/:id', auth, async (req, res) => {
   try {
     const [result] = await pool.query(
-      "UPDATE orders SET status = 'verified' WHERE id = ?",
+      "UPDATE orders SET status = 'verified', is_verified = TRUE WHERE id = ?",
       [req.params.id]
     );
 

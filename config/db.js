@@ -129,6 +129,7 @@ async function initializeDB() {
         payment_method VARCHAR(50),
         transaction_id VARCHAR(50),
         status ENUM('pending','paid','verified','cancelled') DEFAULT 'pending',
+        is_verified BOOLEAN DEFAULT FALSE,
         created_by INT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users(id),
