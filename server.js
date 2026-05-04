@@ -13,6 +13,7 @@ const categoryRoutes = require('./routes/categories');
 const vendorRoutes = require('./routes/vendors');
 const paymentRoutes = require('./routes/payment');
 const uploadRoutes = require('./routes/upload');
+const inventoryRoutes = require('./routes/inventory');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -41,6 +42,7 @@ app.use('/api/categories', categoryRoutes);
 app.use('/api/vendors', vendorRoutes);
 app.use('/api/payment', paymentRoutes);
 app.use('/api/upload', uploadRoutes);
+app.use('/api/inventory', inventoryRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {

@@ -196,6 +196,26 @@ async function initializeDB() {
       )
     `);
 
+    // Create inventory_logs table for stock adjustment history
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS inventory_logs (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        product_id INT NOT NULL,
+        product_name VARCHAR(150) NOT NULL,
+        previous_quantity INT NOT NULL,
+        changed_quantity INT NOT NULL,
+        new_quantity INT NOT NULL,
+        action_type ENUM('ADD', 'REMOVE') NOT NULL,
+        admin_id INT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (product_id) REFERENCES products(id),
+        FOREIGN KEY (admin_id) REFERENCES users(id),
+        INDEX idx_product (product_id),
+        INDEX idx_admin (admin_id),
+        INDEX idx_created (created_at)
+      )
+    `);
+
     console.log('✅ Database tables initialized');
   } catch (error) {
     console.error('❌ Database initialization error:', error.message);

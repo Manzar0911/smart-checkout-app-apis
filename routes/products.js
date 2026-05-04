@@ -151,7 +151,7 @@ router.delete('/:id', auth, async (req, res) => {
 router.post('/:id/barcode', auth, async (req, res) => {
   try {
     const { id } = req.params;
-    const { mfgDate, expiryDate, stockQuantity } = req.body;
+    const { mfgDate, expiryDate, stockQuantity = 0 } = req.body;
 
     const barcode = Math.floor(100000000000 + Math.random() * 900000000000).toString();
 
