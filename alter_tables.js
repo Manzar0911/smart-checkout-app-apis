@@ -39,8 +39,14 @@ async function runAlters() {
     console.error('❌ Migration error:', error);
   } finally {
     connection.release();
-    process.exit();
+    if (require.main === module) {
+      process.exit();
+    }
   }
 }
 
-runAlters();
+if (require.main === module) {
+  runAlters();
+}
+
+module.exports = { runAlters };

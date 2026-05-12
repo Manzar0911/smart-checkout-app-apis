@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { initializeDB } = require('./config/db');
+const { runAlters } = require('./alter_tables');
 
 // Import routes
 const authRoutes = require('./routes/auth');
@@ -59,11 +60,11 @@ app.use((err, req, res, next) => {
   console.error('Unhandled error:', err);
   res.status(500).json({ message: 'Internal server error' });
 });
-
 // Start server
 async function start() {
   try {
     await initializeDB();
+    await runAlters();
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`\n🚀 Smart Checkout API running on http://0.0.0.0:${PORT}`);
       console.log(`📋 Health check: http://192.168.1.64:${PORT}/api/health\n`);
