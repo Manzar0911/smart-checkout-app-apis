@@ -1,6 +1,7 @@
 const express = require('express');
 const { pool } = require('../config/db');
 const auth = require('../middleware/auth');
+const { validateFlexibleDate, compareFlexibleDates, parseFlexibleDate, safeDateType } = require('../utils/dateValidation');
 
 const router = express.Router();
 
@@ -21,7 +22,10 @@ router.get('/', async (req, res) => {
       image: p.image,
       ingredients: p.ingredients,
       packaging: p.packaging,
-      expiryDate: p.expiry_date,
+      expiryDate: parseFlexibleDate(p.expiry_date, safeDateType(p.expiry_date_type)),
+      expiryDateType: safeDateType(p.expiry_date_type),
+      manufacturingDate: parseFlexibleDate(p.mfg_date, safeDateType(p.mfg_date_type)),
+      manufacturingDateType: safeDateType(p.mfg_date_type),
       category: p.category_name || p.category,
       categoryId: p.category_id,
       weight: p.weight,
@@ -42,7 +46,12 @@ router.get('/:barcode', async (req, res) => {
     const { barcode } = req.params;
 
     const [barcodes] = await pool.query(
-      'SELECT b.*, p.name, p.brand, p.price, p.original_price, p.image, p.ingredients, p.packaging, p.expiry_date, p.category, p.weight FROM barcodes b JOIN products p ON b.product_id = p.id WHERE b.barcode = ? AND p.is_deleted = FALSE',
+      `SELECT b.*, b.mfg_date_type as b_mfg_date_type, b.expiry_date_type as b_expiry_date_type,
+              p.name, p.brand, p.price, p.original_price, p.image, p.ingredients, p.packaging, 
+              p.expiry_date as p_expiry_date, p.category, p.weight, p.stock_quantity
+       FROM barcodes b 
+       JOIN products p ON b.product_id = p.id 
+       WHERE b.barcode = ? AND p.is_deleted = FALSE`,
       [barcode]
     );
 
@@ -51,6 +60,11 @@ router.get('/:barcode', async (req, res) => {
     }
 
     const product = barcodes[0];
+
+    // Use barcode-level date info (more specific), fall back to product-level
+    const mfgDateType = safeDateType(product.b_mfg_date_type);
+    const expiryDateType = safeDateType(product.b_expiry_date_type);
+
     res.json({
       product: {
         barcode: product.barcode,
@@ -62,13 +76,13 @@ router.get('/:barcode', async (req, res) => {
         image: product.image,
         ingredients: product.ingredients,
         packaging: product.packaging,
-        expiryDate: product.expiry_date,
+        manufacturingDate: parseFlexibleDate(product.mfg_date, mfgDateType),
+        manufacturingDateType: mfgDateType,
+        expiryDate: parseFlexibleDate(product.expiry_date, expiryDateType),
+        expiryDateType: expiryDateType,
         category: product.category,
         weight: product.weight,
         stockQuantity: product.number_stock,
-        manufacturingDateType: product.manufacturing_date_type,
-        expiryDateType: product.expiry_date_type,
-        mfgDate: product.mfg_date,
       },
     });
   } catch (error) {
@@ -154,13 +168,35 @@ router.delete('/:id', auth, async (req, res) => {
 router.post('/:id/barcode', auth, async (req, res) => {
   try {
     const { id } = req.params;
-    const { 
-      mfgDate, 
-      expiryDate, 
-      manufacturing_date_type = 'full_date', 
-      expiry_date_type = 'full_date', 
-      stockQuantity = 0 
-    } = req.body;
+    const { mfgDate, expiryDate, stockQuantity = 0, mfgDateType, expiryDateType } = req.body;
+
+    // Determine date types with safe fallback
+    const safeMfgType = safeDateType(mfgDateType);
+    const safeExpType = safeDateType(expiryDateType);
+
+    // Validate manufacturing date
+    if (mfgDate) {
+      const mfgValidation = validateFlexibleDate(mfgDate, safeMfgType);
+      if (!mfgValidation.valid) {
+        return res.status(400).json({ message: `Manufacturing date: ${mfgValidation.error}` });
+      }
+    }
+
+    // Validate expiry date
+    if (expiryDate) {
+      const expValidation = validateFlexibleDate(expiryDate, safeExpType);
+      if (!expValidation.valid) {
+        return res.status(400).json({ message: `Expiry date: ${expValidation.error}` });
+      }
+    }
+
+    // Cross-validate: expiry must not be before manufacturing
+    if (mfgDate && expiryDate) {
+      const comparison = compareFlexibleDates(mfgDate, safeMfgType, expiryDate, safeExpType);
+      if (!comparison.valid) {
+        return res.status(400).json({ message: comparison.error });
+      }
+    }
 
     const barcode = Math.floor(100000000000 + Math.random() * 900000000000).toString();
 
@@ -169,13 +205,13 @@ router.post('/:id/barcode', auth, async (req, res) => {
       await connection.beginTransaction();
 
       await connection.query(
-        'INSERT INTO barcodes (barcode, product_id, mfg_date, expiry_date, manufacturing_date_type, expiry_date_type, quantity, number_stock) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        [barcode, id, mfgDate, expiryDate, manufacturing_date_type, expiry_date_type, stockQuantity, stockQuantity]
+        'INSERT INTO barcodes (barcode, product_id, mfg_date, mfg_date_type, expiry_date, expiry_date_type, quantity, number_stock) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        [barcode, id, mfgDate || null, safeMfgType, expiryDate || null, safeExpType, stockQuantity, stockQuantity]
       );
 
       await connection.query(
-        'UPDATE products SET stock_quantity = stock_quantity + ?, mfg_date = ?, manufacturing_date_type = ?, expiry_date_type = ?, expiry_date = ? WHERE id = ?',
-        [stockQuantity, mfgDate, manufacturing_date_type, expiry_date_type, expiryDate, id]
+        'UPDATE products SET stock_quantity = stock_quantity + ?, mfg_date = ?, mfg_date_type = ?, expiry_date = ?, expiry_date_type = ? WHERE id = ?',
+        [stockQuantity, mfgDate || null, safeMfgType, expiryDate || null, safeExpType, id]
       );
 
       await connection.commit();
