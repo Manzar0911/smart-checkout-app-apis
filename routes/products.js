@@ -66,6 +66,9 @@ router.get('/:barcode', async (req, res) => {
         category: product.category,
         weight: product.weight,
         stockQuantity: product.number_stock,
+        manufacturingDateType: product.manufacturing_date_type,
+        expiryDateType: product.expiry_date_type,
+        mfgDate: product.mfg_date,
       },
     });
   } catch (error) {
@@ -151,7 +154,13 @@ router.delete('/:id', auth, async (req, res) => {
 router.post('/:id/barcode', auth, async (req, res) => {
   try {
     const { id } = req.params;
-    const { mfgDate, expiryDate, stockQuantity = 0 } = req.body;
+    const { 
+      mfgDate, 
+      expiryDate, 
+      manufacturing_date_type = 'full_date', 
+      expiry_date_type = 'full_date', 
+      stockQuantity = 0 
+    } = req.body;
 
     const barcode = Math.floor(100000000000 + Math.random() * 900000000000).toString();
 
@@ -160,13 +169,13 @@ router.post('/:id/barcode', auth, async (req, res) => {
       await connection.beginTransaction();
 
       await connection.query(
-        'INSERT INTO barcodes (barcode, product_id, mfg_date, expiry_date, quantity, number_stock) VALUES (?, ?, ?, ?, ?, ?)',
-        [barcode, id, mfgDate, expiryDate, stockQuantity, stockQuantity]
+        'INSERT INTO barcodes (barcode, product_id, mfg_date, expiry_date, manufacturing_date_type, expiry_date_type, quantity, number_stock) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        [barcode, id, mfgDate, expiryDate, manufacturing_date_type, expiry_date_type, stockQuantity, stockQuantity]
       );
 
       await connection.query(
-        'UPDATE products SET stock_quantity = stock_quantity + ?, mfg_date = ? WHERE id = ?',
-        [stockQuantity, mfgDate, id]
+        'UPDATE products SET stock_quantity = stock_quantity + ?, mfg_date = ?, manufacturing_date_type = ?, expiry_date_type = ?, expiry_date = ? WHERE id = ?',
+        [stockQuantity, mfgDate, manufacturing_date_type, expiry_date_type, expiryDate, id]
       );
 
       await connection.commit();
