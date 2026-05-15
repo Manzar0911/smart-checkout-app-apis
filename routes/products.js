@@ -5,6 +5,29 @@ const { validateFlexibleDate, compareFlexibleDates, parseFlexibleDate, safeDateT
 
 const router = express.Router();
 
+// ─── Helper: safe barcode source ───
+const VALID_BARCODE_SOURCES = ['generated', 'mapped_existing'];
+const safeSource = (source) => VALID_BARCODE_SOURCES.includes(source) ? source : 'generated';
+
+// ─── Helper: validate barcode value ───
+const validateBarcodeValue = (value) => {
+  if (!value || (typeof value === 'string' && value.trim() === '')) {
+    return { valid: false, error: 'Barcode value is required.' };
+  }
+  const trimmed = String(value).trim();
+  if (trimmed.length === 0) {
+    return { valid: false, error: 'Barcode value cannot be empty.' };
+  }
+  if (trimmed.length > 50) {
+    return { valid: false, error: 'Barcode value is too long (max 50 characters).' };
+  }
+  // Allow alphanumeric, dashes, dots (common barcode characters)
+  if (!/^[a-zA-Z0-9\-\.]+$/.test(trimmed)) {
+    return { valid: false, error: 'Barcode contains invalid characters. Only alphanumeric, dashes, and dots allowed.' };
+  }
+  return { valid: true, error: null, value: trimmed };
+};
+
 // GET /api/products - Get all products
 router.get('/', async (req, res) => {
   try {
@@ -40,13 +63,316 @@ router.get('/', async (req, res) => {
   }
 });
 
-// GET /api/products/:barcode - Get product by barcode
+// ══════════════════════════════════════════════════════════════
+// MAP EXISTING BARCODE ENDPOINTS
+// These MUST be defined BEFORE the /:barcode route
+// ══════════════════════════════════════════════════════════════
+
+// POST /api/products/map-barcode - Map an existing barcode to a product
+router.post('/map-barcode', auth, async (req, res) => {
+  try {
+    const {
+      productId,
+      barcodeValue,
+      manufacturing_date,
+      manufacturing_date_type,
+      expiry_date,
+      expiry_date_type,
+    } = req.body;
+
+    // ── Validate product ID ──
+    if (!productId) {
+      return res.status(400).json({ message: 'Product ID is required.' });
+    }
+
+    // ── Validate barcode value ──
+    const barcodeValidation = validateBarcodeValue(barcodeValue);
+    if (!barcodeValidation.valid) {
+      return res.status(400).json({ message: barcodeValidation.error });
+    }
+    const cleanBarcode = barcodeValidation.value;
+
+    // ── Validate product exists ──
+    const [products] = await pool.query(
+      'SELECT id, name FROM products WHERE id = ? AND is_deleted = FALSE',
+      [productId]
+    );
+    if (products.length === 0) {
+      return res.status(404).json({ message: 'Product not found.' });
+    }
+
+    // ── Validate flexible dates ──
+    const safeMfgType = safeDateType(manufacturing_date_type);
+    const safeExpType = safeDateType(expiry_date_type);
+
+    if (manufacturing_date) {
+      const mfgValidation = validateFlexibleDate(manufacturing_date, safeMfgType);
+      if (!mfgValidation.valid) {
+        return res.status(400).json({ message: `Manufacturing date: ${mfgValidation.error}` });
+      }
+    }
+
+    if (expiry_date) {
+      const expValidation = validateFlexibleDate(expiry_date, safeExpType);
+      if (!expValidation.valid) {
+        return res.status(400).json({ message: `Expiry date: ${expValidation.error}` });
+      }
+    }
+
+    // ── Cross-validate: expiry not before manufacturing ──
+    if (manufacturing_date && expiry_date) {
+      const comparison = compareFlexibleDates(manufacturing_date, safeMfgType, expiry_date, safeExpType);
+      if (!comparison.valid) {
+        return res.status(400).json({ message: comparison.error });
+      }
+    }
+
+    // ── Check for duplicate barcode ──
+    const [existingBarcodes] = await pool.query(
+      'SELECT barcode, product_id FROM barcodes WHERE barcode = ?',
+      [cleanBarcode]
+    );
+
+    if (existingBarcodes.length > 0) {
+      const existing = existingBarcodes[0];
+      if (String(existing.product_id) === String(productId)) {
+        return res.status(409).json({
+          message: 'This barcode is already mapped to this product.',
+          code: 'DUPLICATE_SAME_PRODUCT',
+        });
+      } else {
+        return res.status(409).json({
+          message: 'This barcode is already mapped to another product.',
+          code: 'DUPLICATE_DIFFERENT_PRODUCT',
+        });
+      }
+    }
+
+    // ── Insert barcode mapping ──
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+
+      await connection.query(
+        `INSERT INTO barcodes (barcode, product_id, mfg_date, mfg_date_type, expiry_date, expiry_date_type, quantity, number_stock, barcode_source)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [cleanBarcode, productId, manufacturing_date || null, safeMfgType, expiry_date || null, safeExpType, 0, 0, 'mapped_existing']
+      );
+
+      await connection.commit();
+
+      res.status(201).json({
+        message: 'Barcode mapped successfully!',
+        barcode: cleanBarcode,
+        productId: productId,
+        productName: products[0].name,
+        barcodeSource: 'mapped_existing',
+      });
+    } catch (err) {
+      await connection.rollback();
+      throw err;
+    } finally {
+      connection.release();
+    }
+  } catch (error) {
+    console.error('Map barcode error:', error);
+    res.status(500).json({ message: 'Server error.' });
+  }
+});
+
+// GET /api/products/barcodes/list - Get all barcodes with product details (admin)
+router.get('/barcodes/list', auth, async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 50;
+    const offset = (page - 1) * limit;
+
+    const [barcodes] = await pool.query(
+      `SELECT b.barcode, b.product_id, b.mfg_date, b.mfg_date_type, b.expiry_date, b.expiry_date_type,
+              b.barcode_source, b.quantity, b.number_stock, b.created_at,
+              p.name as product_name, p.brand as product_brand
+       FROM barcodes b
+       JOIN products p ON b.product_id = p.id
+       WHERE p.is_deleted = FALSE
+       ORDER BY b.created_at DESC
+       LIMIT ? OFFSET ?`,
+      [limit, offset]
+    );
+
+    const [countResult] = await pool.query(
+      'SELECT COUNT(*) as total FROM barcodes b JOIN products p ON b.product_id = p.id WHERE p.is_deleted = FALSE'
+    );
+
+    const formatted = barcodes.map((b) => ({
+      barcode: b.barcode,
+      productId: b.product_id,
+      productName: b.product_name,
+      productBrand: b.product_brand,
+      manufacturingDate: parseFlexibleDate(b.mfg_date, safeDateType(b.mfg_date_type)),
+      manufacturingDateType: safeDateType(b.mfg_date_type),
+      expiryDate: parseFlexibleDate(b.expiry_date, safeDateType(b.expiry_date_type)),
+      expiryDateType: safeDateType(b.expiry_date_type),
+      barcodeSource: safeSource(b.barcode_source),
+      quantity: b.quantity,
+      stock: b.number_stock,
+      createdAt: b.created_at,
+    }));
+
+    res.json({
+      barcodes: formatted,
+      pagination: {
+        page,
+        limit,
+        total: countResult[0].total,
+        totalPages: Math.ceil(countResult[0].total / limit),
+      },
+    });
+  } catch (error) {
+    console.error('Get barcodes list error:', error);
+    res.status(500).json({ message: 'Server error.' });
+  }
+});
+
+// PUT /api/products/barcode/:barcode - Edit a barcode record
+router.put('/barcode/:barcode', auth, async (req, res) => {
+  try {
+    const { barcode } = req.params;
+    const {
+      productId,
+      newBarcodeValue,
+      manufacturing_date,
+      manufacturing_date_type,
+      expiry_date,
+      expiry_date_type,
+    } = req.body;
+
+    // ── Verify barcode exists ──
+    const [existing] = await pool.query('SELECT * FROM barcodes WHERE barcode = ?', [barcode]);
+    if (existing.length === 0) {
+      return res.status(404).json({ message: 'Barcode not found.' });
+    }
+
+    // ── If changing barcode value, validate and check duplicates ──
+    let finalBarcode = barcode;
+    if (newBarcodeValue && newBarcodeValue !== barcode) {
+      const barcodeValidation = validateBarcodeValue(newBarcodeValue);
+      if (!barcodeValidation.valid) {
+        return res.status(400).json({ message: barcodeValidation.error });
+      }
+      finalBarcode = barcodeValidation.value;
+
+      // Check for duplicates with new value
+      const [duplicates] = await pool.query(
+        'SELECT barcode, product_id FROM barcodes WHERE barcode = ?',
+        [finalBarcode]
+      );
+      if (duplicates.length > 0) {
+        return res.status(409).json({ message: 'The new barcode value is already in use.' });
+      }
+    }
+
+    // ── If changing product, validate it exists ──
+    const finalProductId = productId || existing[0].product_id;
+    if (productId) {
+      const [products] = await pool.query(
+        'SELECT id FROM products WHERE id = ? AND is_deleted = FALSE',
+        [productId]
+      );
+      if (products.length === 0) {
+        return res.status(404).json({ message: 'Product not found.' });
+      }
+    }
+
+    // ── Validate flexible dates ──
+    const safeMfgType = safeDateType(manufacturing_date_type || existing[0].mfg_date_type);
+    const safeExpType = safeDateType(expiry_date_type || existing[0].expiry_date_type);
+    const finalMfgDate = manufacturing_date !== undefined ? manufacturing_date : existing[0].mfg_date;
+    const finalExpDate = expiry_date !== undefined ? expiry_date : existing[0].expiry_date;
+
+    if (finalMfgDate) {
+      const mfgValidation = validateFlexibleDate(finalMfgDate, safeMfgType);
+      if (!mfgValidation.valid) {
+        return res.status(400).json({ message: `Manufacturing date: ${mfgValidation.error}` });
+      }
+    }
+
+    if (finalExpDate) {
+      const expValidation = validateFlexibleDate(finalExpDate, safeExpType);
+      if (!expValidation.valid) {
+        return res.status(400).json({ message: `Expiry date: ${expValidation.error}` });
+      }
+    }
+
+    if (finalMfgDate && finalExpDate) {
+      const comparison = compareFlexibleDates(finalMfgDate, safeMfgType, finalExpDate, safeExpType);
+      if (!comparison.valid) {
+        return res.status(400).json({ message: comparison.error });
+      }
+    }
+
+    // ── Update barcode record ──
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+
+      await connection.query(
+        `UPDATE barcodes SET barcode = ?, product_id = ?, mfg_date = ?, mfg_date_type = ?, expiry_date = ?, expiry_date_type = ?
+         WHERE barcode = ?`,
+        [finalBarcode, finalProductId, finalMfgDate || null, safeMfgType, finalExpDate || null, safeExpType, barcode]
+      );
+
+      await connection.commit();
+
+      res.json({
+        message: 'Barcode updated successfully!',
+        barcode: finalBarcode,
+        productId: finalProductId,
+      });
+    } catch (err) {
+      await connection.rollback();
+      throw err;
+    } finally {
+      connection.release();
+    }
+  } catch (error) {
+    console.error('Update barcode error:', error);
+    res.status(500).json({ message: 'Server error.' });
+  }
+});
+
+// DELETE /api/products/barcode/:barcode - Delete a barcode record
+router.delete('/barcode/:barcode', auth, async (req, res) => {
+  try {
+    const { barcode } = req.params;
+
+    // Verify barcode exists
+    const [existing] = await pool.query('SELECT barcode, product_id FROM barcodes WHERE barcode = ?', [barcode]);
+    if (existing.length === 0) {
+      return res.status(404).json({ message: 'Barcode not found.' });
+    }
+
+    // Delete barcode record (does NOT affect the product)
+    await pool.query('DELETE FROM barcodes WHERE barcode = ?', [barcode]);
+
+    res.json({
+      message: 'Barcode deleted successfully!',
+      barcode: barcode,
+    });
+  } catch (error) {
+    console.error('Delete barcode error:', error);
+    res.status(500).json({ message: 'Server error.' });
+  }
+});
+
+// GET /api/products/:barcode - Get product by barcode (SCANNER ENDPOINT)
+// Works for BOTH generated and mapped_existing barcodes
 router.get('/:barcode', async (req, res) => {
   try {
     const { barcode } = req.params;
 
     const [barcodes] = await pool.query(
       `SELECT b.*, b.mfg_date_type as b_mfg_date_type, b.expiry_date_type as b_expiry_date_type,
+              b.barcode_source,
               p.name, p.brand, p.price, p.original_price, p.image, p.ingredients, p.packaging, 
               p.expiry_date as p_expiry_date, p.category, p.weight, p.stock_quantity
        FROM barcodes b 
@@ -83,6 +409,7 @@ router.get('/:barcode', async (req, res) => {
         category: product.category,
         weight: product.weight,
         stockQuantity: product.number_stock,
+        barcodeSource: safeSource(product.barcode_source),
       },
     });
   } catch (error) {
@@ -205,8 +532,8 @@ router.post('/:id/barcode', auth, async (req, res) => {
       await connection.beginTransaction();
 
       await connection.query(
-        'INSERT INTO barcodes (barcode, product_id, mfg_date, mfg_date_type, expiry_date, expiry_date_type, quantity, number_stock) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        [barcode, id, mfgDate || null, safeMfgType, expiryDate || null, safeExpType, stockQuantity, stockQuantity]
+        'INSERT INTO barcodes (barcode, product_id, mfg_date, mfg_date_type, expiry_date, expiry_date_type, quantity, number_stock, barcode_source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [barcode, id, mfgDate || null, safeMfgType, expiryDate || null, safeExpType, stockQuantity, stockQuantity, 'generated']
       );
 
       await connection.query(

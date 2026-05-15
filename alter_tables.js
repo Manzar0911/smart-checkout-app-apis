@@ -34,6 +34,13 @@ async function runAlters() {
     try { await connection.query('ALTER TABLE barcodes MODIFY COLUMN mfg_date VARCHAR(20)'); console.log('   ✅ barcodes.mfg_date → VARCHAR(20)'); } catch(e) { console.log('   ⚠️  barcodes.mfg_date conversion skipped:', e.message); }
     try { await connection.query('ALTER TABLE barcodes MODIFY COLUMN expiry_date VARCHAR(20)'); console.log('   ✅ barcodes.expiry_date → VARCHAR(20)'); } catch(e) { console.log('   ⚠️  barcodes.expiry_date conversion skipped:', e.message); }
 
+    // ── New: Barcode Source Column (Map Existing Barcode feature) ──
+    console.log('\n6. Adding barcode_source column to barcodes...');
+    try { await connection.query("ALTER TABLE barcodes ADD COLUMN barcode_source VARCHAR(30) DEFAULT 'generated'"); console.log('   ✅ barcodes.barcode_source added'); } catch(e) { console.log('   ⏭️  barcodes.barcode_source already exists'); }
+
+    // Backfill any NULL barcode_source values to 'generated'
+    try { await connection.query("UPDATE barcodes SET barcode_source = 'generated' WHERE barcode_source IS NULL"); console.log('   ✅ Backfilled NULL barcode_source values'); } catch(e) { console.log('   ⚠️  Backfill skipped:', e.message); }
+
     console.log('\n✅ All migrations completed successfully!');
   } catch (error) {
     console.error('❌ Migration error:', error);
