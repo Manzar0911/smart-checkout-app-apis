@@ -52,12 +52,16 @@ router.post('/', auth, async (req, res) => {
 
     // Insert order items and update stock
     for (const item of items) {
+      const isFreeItem = !!item.isFreeItem;
+      const originalPrice = parseFloat(item.originalPrice || item.price) || 0;
+      const discountAmount = isFreeItem ? originalPrice * item.quantity : 0;
+
       await connection.query(
-        'INSERT INTO order_items (order_id, product_id, quantity, price) VALUES (?, ?, ?, ?)',
-        [orderId, item.id, item.quantity, item.price]
+        'INSERT INTO order_items (order_id, product_id, quantity, price, is_free_item, offer_id, original_price, discount_amount) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        [orderId, item.id, item.quantity, item.price, isFreeItem, item.offerId || null, originalPrice, discountAmount]
       );
 
-      // Update product stock
+      // Update product stock (deduct for BOTH paid and free items)
       await connection.query(
         'UPDATE products SET stock_quantity = GREATEST(0, stock_quantity - ?) WHERE id = ?',
         [item.quantity, item.id]
@@ -73,6 +77,17 @@ router.post('/', auth, async (req, res) => {
            ) AS t
          )`,
         [item.quantity, item.id]
+      );
+    }
+
+    // Record BXGY offer usage counts
+    const appliedOfferIds = [...new Set(
+      items.filter(i => i.isFreeItem && i.offerId).map(i => i.offerId)
+    )];
+    for (const offerId of appliedOfferIds) {
+      await connection.query(
+        'UPDATE offers SET usage_count = usage_count + 1 WHERE id = ?',
+        [offerId]
       );
     }
 
