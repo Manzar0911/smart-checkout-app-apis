@@ -185,22 +185,37 @@ router.get('/barcodes/list', auth, async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 50;
+    const search = req.query.search || '';
+    const type = req.query.type || 'all';
     const offset = (page - 1) * limit;
+
+    let baseQuery = 'FROM barcodes b JOIN products p ON b.product_id = p.id WHERE p.is_deleted = FALSE';
+    const queryParams = [];
+
+    if (search) {
+      baseQuery += ' AND (p.name LIKE ? OR b.barcode LIKE ?)';
+      queryParams.push(`%${search}%`, `%${search}%`);
+    }
+
+    if (type === 'generated') {
+      baseQuery += " AND b.barcode_source = 'generated'";
+    } else if (type === 'mapped') {
+      baseQuery += " AND b.barcode_source = 'mapped_existing'";
+    }
 
     const [barcodes] = await pool.query(
       `SELECT b.barcode, b.product_id, b.mfg_date, b.mfg_date_type, b.expiry_date, b.expiry_date_type,
               b.barcode_source, b.quantity, b.number_stock, b.created_at,
               p.name as product_name, p.brand as product_brand
-       FROM barcodes b
-       JOIN products p ON b.product_id = p.id
-       WHERE p.is_deleted = FALSE
+       ${baseQuery}
        ORDER BY b.created_at DESC
        LIMIT ? OFFSET ?`,
-      [limit, offset]
+      [...queryParams, limit, offset]
     );
 
     const [countResult] = await pool.query(
-      'SELECT COUNT(*) as total FROM barcodes b JOIN products p ON b.product_id = p.id WHERE p.is_deleted = FALSE'
+      `SELECT COUNT(*) as total ${baseQuery}`,
+      queryParams
     );
 
     const formatted = barcodes.map((b) => ({
